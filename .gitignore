@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.eggs/
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Jupyter / Colab 
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# Raw and intermediate data 
+data/raw/
+data/cache/
+data/*.csv
+data/**/*.csv
+!data/**/sample_*.csv
+
+# Model checkpoints & weights
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Experiment outputs / logs
+results/logs/*
+!results/logs/.gitkeep
+results/tables/*
+!results/tables/.gitkeep
+*.log
+wandb/
+mlruns/
+runs/
+
+# HuggingFace / torch cache
+.cache/
+hf_cache/
+.hf_cache/
+
+# Drive mount (Colab)
+drive/
+MyDrive/
+
+#Env / secrets
+.env
+*.env
+.ipynb_checkpoints
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
