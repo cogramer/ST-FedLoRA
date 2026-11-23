@@ -3,43 +3,45 @@ models/modernbert_lora.py
 Bọc ModernBERT-base (answerdotai/ModernBERT-base, HuggingFace Hub) bằng
 PEFT-LoRA cho bài toán phân loại văn bản (AG News Redis 4 lớp / DBpedia-L1 9 lớp).
 
-Theo mục 4.2-4.3-4.3.1-4.3.2 đề cương, quy trình chia làm hai giai đoạn tách
+Theo mục 4.2-4.3-4.3.1-4.3.2 đề cương, quy trình chia làm HAI giai đoạn tách
 biệt, mỗi giai đoạn có một "chế độ" model khác nhau:
 
-GIAI ĐOẠN 1: Federated Classification Head Warm-up (mục 4.3.1):
+GIAI ĐOẠN 1 - Federated Classification Head Warm-up (mục 4.3.1):
     - Encoder đóng băng hoàn toàn.
     - KHÔNG gắn LoRA.
-    - Chỉ Classification Head (các tham số thuộc `head` và `classifier` của
+    - CHỈ Classification Head (các tham số thuộc `head` và `classifier` của
       ModernBertForSequenceClassification) được huấn luyện, tổng hợp bằng
       FedAvg trên 5 Client, không có Byzantine Client / mẫu Trigger.
     - Dùng `build_warmup_model()`.
     - Kết thúc giai đoạn này, chọn 1 checkpoint Head H* bằng Global Validation.
 
-GIAI ĐOẠN 2: Federated LoRA chính (mục 4.3, 5, 6):
+GIAI ĐOẠN 2 - Federated LoRA chính (mục 4.3, 5, 6):
     - Encoder vẫn đóng băng.
-    - Head được nập lại từ H* (checkpoint chọn ở giai đoạn 1) và đóng băng
+    - Head được NẠP LẠI từ H* (checkpoint chọn ở giai đoạn 1) và ĐÓNG BĂNG
       xuyên suốt giai đoạn này (đề cương: "Server phát tán cùng một
       Classification Head H* đến năm Client và đóng băng Head trong toàn bộ
       giai đoạn Federated LoRA chính").
-    - Chỉ ma trận LoRA A, B được huấn luyện và trao đổi với Server.
+    - CHỈ ma trận LoRA A, B được huấn luyện và trao đổi với Server.
     - Dùng `build_federated_model()`.
 
-Quan trọng: hai giai đoạn này dùng hai hàm dựng model khác nhau nên không dùng
-chung một `build_model()` gắn LoRA + mở khoá Head đồng thời.
+Quan trọng: hai giai đoạn này dùng hai hàm dựng model khác nhau, KHÔNG dùng
+chung một `build_model()` gắn LoRA + mở khoá Head đồng thời như bản trước đây
+của file này (bản đó không còn khớp đề cương vì Head sẽ bị train cùng lúc với
+LoRA ở giai đoạn chính, trái với mục 4.3.1).
 
 Vị trí gắn LoRA (mục 4.3.2):
-    Trong ModernBERT, Query/Key/Value được hợp nhất trong 1 lớp tuyến tính
-    tên `Wqkv`. Cấu hình PEFT chuẩn của nghiên cứu chỉ gắn LoRA vào `Wqkv`:
+    Trong ModernBERT, Query/Key/Value được hợp nhất trong MỘT lớp tuyến tính
+    tên `Wqkv`. Cấu hình PEFT CHUẨN của nghiên cứu CHỈ gắn LoRA vào `Wqkv`:
         target_modules = ["Wqkv"]
-    Đây không tương đương với việc chỉ gắn riêng Query và Value 
-    (sẽ cần cơ chế cắt lát/custom adapter khác, không thuộc phạm vi
-    khảo sát). Vì vậy không thêm "Wo" (output projection) hay
+    Đề cương ghi rõ đây KHÔNG tương đương với việc chỉ gắn riêng Query và
+    Value (sẽ cần cơ chế cắt lát/custom adapter khác, không thuộc phạm vi
+    khảo sát). Vì vậy KHÔNG thêm "Wo" (output projection) hay
     ["query", "value"] vào danh sách này.
 
 Rank và scale (mục 4.3.2, bảng mục 8):
     r ∈ {2, 4, 8}; cố định tỉ lệ alpha/r = 2 -> alpha tương ứng là 4, 8, 16.
     `LoRAModelConfig.lora_alpha` mặc định None và được tự tính = 2*r trong
-    `__post_init__`, để tránh vô tình đặt alpha cố định không đổi theo r.
+    `__post_init__`, để không ai vô tình đặt alpha cố định không đổi theo r.
 
 LoRA Aggregation Discordance (mục 3.4):
     Server/Client chỉ trao đổi và tổng hợp A, B độc lập (factor-wise:
@@ -79,14 +81,19 @@ except ImportError as e:  # pragma: no cover
 
 MODERNBERT_CHECKPOINT = "answerdotai/ModernBERT-base"
 
+# CHỈ "Wqkv" theo đúng mục 4.3.2 của đề cương (xem docstring đầu file).
 # Chạy thử `model.named_modules()` trên đúng phiên bản Transformers đang dùng
-# để xác nhận suffix "Wqkv" vẫn còn đúng.
+# để xác nhận suffix "Wqkv" vẫn còn đúng (ghi chú kiểm tra trước của đề cương).
 DEFAULT_TARGET_MODULES = ["Wqkv"]
 
 # Tên các module con thực tế của ModernBertForSequenceClassification chứa
 # Classification Head (prediction head "head": dense+activation+norm, và lớp
-# tuyến tính cuối "classifier"). Xem mục 4.3: "Classification Head của
+# tuyến tính cuối "classifier") -- xem mục 4.3: "Classification Head của
 # ModernBERT áp dụng prediction head, dropout và lớp phân loại cuối".
+# Lưu ý: bản trước của file này dùng modules_to_save=["classifier", "score"],
+# nhưng "score" không phải tên module của kiến trúc ModernBERT (đó là tên
+# dùng ở một số kiến trúc khác như Llama-for-classification) nên bị bỏ qua
+# âm thầm; đồng thời "head" (phần dense+norm) đã bị thiếu hoàn toàn.
 HEAD_MODULE_NAMES = ["head", "classifier"]
 
 
@@ -124,7 +131,7 @@ def _is_head_param(name: str) -> bool:
 
 
 def _build_backbone(cfg: LoRAModelConfig) -> nn.Module:
-    """Tải ModernBERT-base, đóng băng toàn bộ tham số (kể cả Head). Dùng
+    """Tải ModernBERT-base, đóng băng TOÀN BỘ tham số (kể cả Head). Dùng
     chung cho cả build_warmup_model và build_federated_model; mỗi hàm sẽ tự
     mở khoá phần tham số phù hợp với giai đoạn của mình."""
     base_model = AutoModelForSequenceClassification.from_pretrained(
@@ -140,7 +147,7 @@ def _build_backbone(cfg: LoRAModelConfig) -> nn.Module:
 def build_warmup_model(cfg: LoRAModelConfig) -> nn.Module:
     """
     GIAI ĐOẠN 1 (mục 4.3.1): Federated Classification Head Warm-up.
-    Trả về model không có LoRA:
+    Trả về model KHÔNG có LoRA:
         - Encoder: requires_grad = False (đóng băng)
         - Head (head.* và classifier.*): requires_grad = True
     Không có Byzantine Client hay mẫu Trigger ở giai đoạn này; Server tổng
@@ -171,13 +178,15 @@ def build_federated_model(
 
     - Encoder: đóng băng (như trước).
     - Head: nạp từ `head_state_dict` (checkpoint H* chọn ở giai đoạn 1, xem
-      `get_head_state_dict`/warm-up). Head không được đưa vào
-      `modules_to_save` của LoraConfig, nên `get_peft_model` sẽ tự động đặt
-      requires_grad=False cho toàn bộ Head. Theo cái "đóng băng Head
-      trong toàn bộ giai đoạn Federated LoRA chính" của đề cương.
+      `get_head_state_dict`/warm-up), nạp TRƯỚC khi gọi `get_peft_model` nên
+      cả hai nhánh mà PEFT tạo ra cho Head (original_module và
+      modules_to_save.default) đều mang đúng trọng số H*. Sau khi tạo
+      PeftModel, Head bị khoá lại tường minh (requires_grad=False) vì PEFT
+      tự động mở khoá "classifier"/"score" cho mọi task_type="SEQ_CLS" bất
+      kể cấu hình -- xem chú thích chi tiết ngay tại dòng khoá lại bên dưới.
       Nếu `head_state_dict=None` (vd. chạy smoke-test nhanh không qua
       warm-up), Head giữ nguyên trọng số khởi tạo ngẫu nhiên của checkpoint
-      gốc nhưng vẫn bị đóng băng, nhưng không nên dùng cấu hình này để báo cáo kết
+      gốc nhưng vẫn bị đóng băng -- không dùng cấu hình này để báo cáo kết
       quả chính thức.
     - LoRA: chỉ gắn vào `cfg.target_modules` (mặc định ["Wqkv"]).
     """
@@ -201,7 +210,7 @@ def build_federated_model(
         target_modules=cfg.target_modules,
         bias="none",
         task_type="SEQ_CLS",
-        # Không đưa Head vào modules_to_save: Head phải đóng băng ở giai
+        # KHÔNG đưa Head vào modules_to_save: Head phải đóng băng ở giai
         # đoạn này (mục 4.3.1), không phải tham số trao đổi liên bang.
         modules_to_save=None,
     )
@@ -212,15 +221,31 @@ def build_federated_model(
     torch.manual_seed(cfg.init_seed)
     model = get_peft_model(base_model, lora_config)
 
-    # Sanity-check: Head phải thực sự bị đóng băng sau get_peft_model().
+    # QUAN TRỌNG: với task_type="SEQ_CLS", PEFT's PeftModelForSequenceClassification
+    # TỰ ĐỘNG đưa "classifier"/"score" vào modules_to_save ngay trong __init__
+    # của nó, BẤT KỂ LoraConfig.modules_to_save được truyền là None hay không
+    # (đây là hành vi cứng của thư viện PEFT, không có cờ cấu hình nào tắt
+    # được). Hệ quả là Head bị PEFT tự bọc lại bằng ModulesToSaveWrapper và
+    # TỰ MỞ KHOÁ (requires_grad=True) ngay cả khi ta không hề yêu cầu, trái
+    # với mục 4.3.1 (Head phải đóng băng xuyên suốt giai đoạn Federated LoRA
+    # chính). Vì không thể tắt qua cấu hình, ta CHỦ ĐỘNG khoá lại toàn bộ
+    # tham số Head ngay sau khi PeftModel được tạo, ghi đè quyết định mặc
+    # định của PEFT. `_is_head_param` so khớp theo tên module con ("head",
+    # "classifier") nên vẫn đúng với cả hai nhánh mà PEFT tạo ra
+    # (*.classifier.original_module.* và *.classifier.modules_to_save.default.*).
+    for name, param in model.named_parameters():
+        if _is_head_param(name):
+            param.requires_grad = False
+
+    # Sanity-check: Head phải thực sự bị đóng băng sau khi đã khoá lại ở trên.
     still_trainable_head = [
         name for name, p in model.named_parameters()
         if _is_head_param(name) and p.requires_grad
     ]
     if still_trainable_head:
         raise RuntimeError(
-            "Head vẫn còn requires_grad=True sau khi gắn LoRA"
-            f"Tham số còn mở khoá: {still_trainable_head}"
+            "Head vẫn còn requires_grad=True sau khi gắn LoRA, trái với mục "
+            f"4.3.1 của đề cương. Tham số còn mở khoá: {still_trainable_head}"
         )
 
     return model
@@ -228,7 +253,7 @@ def build_federated_model(
 
 def count_trainable_parameters(model: nn.Module) -> dict[str, int]:
     """In ra số tham số trainable so với tổng số tham số để sanity-check:
-    ở giai đoạn 1 chỉ có Head trainable, ở giai đoạn 2 chỉ có LoRA (A, B)
+    ở giai đoạn 1, chỉ Head trainable; ở giai đoạn 2, chỉ LoRA (A, B)
     trainable và Head phải bằng 0 tham số mở khoá."""
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -314,7 +339,7 @@ def lora_state_dict_to_flat_vector(lora_state: dict[str, torch.Tensor]) -> torch
     """
     Làm phẳng toàn bộ state (A và B gộp theo thứ tự key cố định) thành 1
     vector 1-D. Dùng cho các cơ chế phòng thủ cần so sánh khoảng cách giữa
-    các client (Krum, Trimmed Mean, TC-LoRA). u_i = Concat(vec(ΔA_i),
+    các client (Krum, Trimmed Mean, TC-LoRA) -- u_i = Concat(vec(ΔA_i),
     vec(ΔB_i)) theo mục 3.2/3.4 của đề cương. Các module đó sẽ tự quyết định
     có tách A/B ra so sánh riêng hay gộp chung; hàm này chỉ cung cấp tiện ích
     làm phẳng với thứ tự khoá được sorted nhất quán để mọi client so sánh
