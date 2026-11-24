@@ -2,7 +2,8 @@
 attack/cc_malicious_lora_sgd.py
 
 CC-MaliciousLoRA-SGD: bộ tối ưu hóa cục bộ khảo sát tại Byzantine Client,
-theo mục 5.2-5.6 của đề cương. File này gộp 4 thành phần liên quan với nhau:
+đúng theo mục 5.2-5.6 của đề cương. File này gộp 4 thành phần liên quan chặt
+chẽ với nhau, theo đúng thứ tự mô tả trong đề cương:
 
     5.2  Hàm mất mát đa mục tiêu: L_local = L_clean + λ_poison * L_poison
          -> `combine_local_loss`
@@ -10,7 +11,7 @@ theo mục 5.2-5.6 của đề cương. File này gộp 4 thành phần liên qu
          Local Optimizer của Fu et al. [9])
          -> `MaliciousSGD` (torch.optim.Optimizer)
     5.4  Clean Reference Update và ràng buộc Cosine (định nghĩa, không phải
-         thuật toán tối ưu riêng: shadow training nằm ở federated/, module
+         thuật toán tối ưu riêng -- shadow training nằm ở federated/, module
          này chỉ cung cấp hàm tính u_mal, u_ref từ state dict đã có)
          -> `compute_delta_state_dict`, `flatten_delta_state_dict`
     5.5  Phép chiếu hướng bảo toàn norm
@@ -21,13 +22,13 @@ theo mục 5.2-5.6 của đề cương. File này gộp 4 thành phần liên qu
 Hàm tổng hợp `finalize_malicious_update()` nối toàn bộ 5.4-5.6 thành một
 bước duy nhất: nhận (A_t,B_t), (A_mal,B_mal) sau khi train MaliciousSGD trên
 L_local, và (A_ref,B_ref) từ shadow run trên D_clean (tính ở federated/client
-Byzantine, không tính trong module này vì cần vòng lặp train/data loader),
+Byzantine, KHÔNG tính trong module này vì cần vòng lặp train/data loader),
 trả về adapter cuối cùng sẵn sàng gửi lên Server cùng log chẩn đoán.
 
-Quy ước nguồn ngẫu nhiên (xem data/partition.py, data/poison.py để biết các
-nguồn khác): nhiễu Gaussian ξ ở mục 5.6 dùng `torch.Generator` với seed riêng
-(`gaussian_seed` trong `CCMaliciousLoRASGDConfig`), khác với seed partition
-Client, seed init LoRA A, seed chọn mẫu đầu độc ở data/poison.py. Không
+QUY ƯỚC NGUỒN NGẪU NHIÊN (xem data/partition.py, data/poison.py để biết các
+nguồn khác): nhiễu Gaussian ξ ở mục 5.6 dùng `torch.Generator` với seed RIÊNG
+(`gaussian_seed` trong `CCMaliciousLoRASGDConfig`), KHÁC HẲN seed partition
+Client, seed init LoRA A, và seed chọn mẫu đầu độc ở data/poison.py. Không
 bao giờ gọi `torch.manual_seed()` toàn cục trong module này.
 """
 
@@ -51,18 +52,21 @@ def combine_local_loss(
     """
     L_local(A,B) = L_clean(A,B) + λ_poison * L_poison(A,B)   (mục 5.2)
 
-    `loss_clean` và `loss_poison` phải là loss trung bình theo số mẫu
-    (reduction="mean") tính riêng trên D_clean và D_poison tương ứng (xem
-    data/poison.py::build_poisoned_fit_set trả về D_clean/D_poison tách
-    biệt chính vì lý do này). Không gộp D_clean và D_poison thành một batch
-    rồi tính 1 loss trung bình chung trên D_mal. Cách đó sẽ ngầm định
+    `loss_clean` và `loss_poison` PHẢI là loss trung bình theo số mẫu
+    (reduction="mean") tính RIÊNG trên D_clean và D_poison tương ứng (xem
+    data/poison.py::build_poisoned_fit_set -- trả về D_clean/D_poison tách
+    biệt chính vì lý do này). KHÔNG gộp D_clean và D_poison thành một batch
+    rồi tính 1 loss trung bình chung trên D_mal -- cách đó sẽ ngầm định
     trọng số bằng tỷ lệ kích thước (thường ρ_poison nhỏ -> D_poison đóng góp
     rất ít), khác với công thức cộng có trọng số λ_poison tường minh ở đây.
     """
     return loss_clean + lambda_poison * loss_poison
 
 
+# ---------------------------------------------------------------------------
 # 5.3. Bộ tối ưu vận tốc thích nghi MaliciousSGD
+# ---------------------------------------------------------------------------
+
 @dataclass
 class MaliciousSGDConfig:
     """Giá trị khởi đầu theo Table 7 của Fu et al. [9] (mục 5.3, bảng mục 8):
@@ -83,9 +87,9 @@ class MaliciousSGD(torch.optim.Optimizer):
 
     Công thức mỗi bước local s (per-coordinate, elementwise):
         v_s^raw = β v_{s-1}^adj + (1-β) g_s
-        (bước local đầu tiên của mỗi tham số: v_{-1}^adj := 0, nên
-         v_s^raw = (1-β) g_s, và theo đề cương thì "sử dụng v_s^adj=v_s^raw"
-         tức chưa áp dụng r_s ở bước này vì chưa có v_{s-1}^adj != 0 để so
+        (bước local ĐẦU TIÊN của mỗi tham số: v_{-1}^adj := 0, nên
+         v_s^raw = (1-β) g_s, và theo đề cương "sử dụng v_s^adj=v_s^raw" --
+         tức CHƯA áp dụng r_s ở bước này vì chưa có v_{s-1}^adj != 0 để so
          sánh tỷ lệ)
         r_s = clip(1 + γ (v_s^raw / v_{s-1}^adj), r_min, r_max)   [bước >= 2]
         v_s^adj = r_s ⊙ v_{s-1}^adj
@@ -94,12 +98,12 @@ class MaliciousSGD(torch.optim.Optimizer):
     Ổn định số học: nếu |v_{s-1,j}^adj| <= ε_v thì tọa độ j đặt r_{s,j}=1
     thay vì chia cho giá trị gần 0 (mục 5.3).
 
-    DUY TRÌ TRẠNG THÁI QUA ROUND: "trạng thái vận tốc... được khởi tạo 
-    một lần ở đầu quá trình huấn luyện của Byzantine Client,
+    DUY TRÌ TRẠNG THÁI QUA ROUND: đề cương yêu cầu "trạng thái vận tốc...
+    được khởi tạo MỘT LẦN ở đầu quá trình huấn luyện của Byzantine Client,
     sau đó được duy trì qua các local minibatch VÀ các global round; tại đầu
     mỗi round, các tham số A, B được đồng bộ từ Server nhưng trạng thái
     optimizer cục bộ vẫn được giữ." Để đúng yêu cầu này:
-        - Dùng lại CÙNG một instance `MaliciousSGD` xuyên suốt toàn bộ quá
+        - Dùng LẠI CÙNG MỘT instance `MaliciousSGD` xuyên suốt toàn bộ quá
           trình huấn luyện của Byzantine Client (không tạo optimizer mới mỗi
           round).
         - Khi đồng bộ (A_t, B_t) mới từ Server, PHẢI nạp giá trị vào ĐÚNG
@@ -195,8 +199,10 @@ class MaliciousSGD(torch.optim.Optimizer):
         self.state = {}
 
 
-
+# ---------------------------------------------------------------------------
 # 5.4 (một phần). Tiện ích xây u_mal, u_ref từ state dict LoRA
+# ---------------------------------------------------------------------------
+
 def compute_delta_state_dict(
     state_before: dict[str, torch.Tensor],
     state_after: dict[str, torch.Tensor],
@@ -245,7 +251,10 @@ def unflatten_to_state_dict(
     return out
 
 
+# ---------------------------------------------------------------------------
 # 5.5. Phép chiếu hướng bảo toàn norm
+# ---------------------------------------------------------------------------
+
 @dataclass
 class CosineProjectionConfig:
     """τ là siêu tham số khảo sát (0.80, 0.85, 0.90 -- mục 5.4, bảng mục 8).
@@ -365,7 +374,10 @@ def project_direction_preserve_norm(
     return u_projected, info
 
 
+# ---------------------------------------------------------------------------
 # 5.6. Gaussian perturbation và kiểm tra lại ràng buộc
+# ---------------------------------------------------------------------------
+
 @torch.no_grad()
 def add_gaussian_and_reproject(
     u_projected: torch.Tensor,
@@ -428,7 +440,10 @@ def add_gaussian_and_reproject(
     return rho * unit_final, info
 
 
+# ---------------------------------------------------------------------------
 # Hàm tổng hợp: nối 5.4 (delta) + 5.5 (chiếu) + 5.6 (nhiễu + chiếu lại)
+# ---------------------------------------------------------------------------
+
 @dataclass
 class CCMaliciousLoRASGDConfig:
     cosine: CosineProjectionConfig
@@ -535,7 +550,7 @@ if __name__ == "__main__":
     rho_before = torch.linalg.norm(u_mal).item()
     u_proj, info_p = project_direction_preserve_norm(u_mal, u_ref, cfg_cos)
     rho_after = torch.linalg.norm(u_proj).item()
-    cos_after = torch.dot(u_proj, u_ref / torch.linalg.norm(u_ref)).item()
+    cos_after = (torch.dot(u_proj, u_ref / torch.linalg.norm(u_ref)) / rho_after).item()
     print(f"  ||u_mal||={rho_before:.4f}  ||u_proj||={rho_after:.4f} (phải bằng nhau)")
     print(f"  cos_sim(u_proj,u_ref)={cos_after:.6f} (phải == tau={cfg_cos.tau})")
     assert abs(rho_before - rho_after) < 1e-4
@@ -546,7 +561,7 @@ if __name__ == "__main__":
     for sigma in (0.01, 0.1, 1.0):
         u_final, info_n = add_gaussian_and_reproject(u_proj, u_ref, cfg_cos, sigma, generator=gen)
         norm_final = torch.linalg.norm(u_final).item()
-        cos_final = torch.dot(u_final, u_ref / torch.linalg.norm(u_ref)).item()
+        cos_final = (torch.dot(u_final, u_ref / torch.linalg.norm(u_ref)) / norm_final).item()
         print(f"  sigma={sigma:5.2f}  ||u_final||={norm_final:.4f} (kỳ vọng={rho_after:.4f})  "
               f"cos_sim_final={cos_final:.6f} (kỳ vọng >= {cfg_cos.tau})")
         assert abs(norm_final - rho_after) < 1e-3
