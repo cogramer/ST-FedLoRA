@@ -30,7 +30,7 @@ import json
 import os
 from typing import Any, Dict, List
 
-from attack.cc_malicious_lora_sgd import MaliciousSGD
+from attack.cc_malicious_lora_sgd import CCMaliciousLoRASGDConfig, CosineProjectionConfig, MaliciousSGD
 from data.loaders import load_agnews_csv, load_dbpedia_csv
 from data.partition import partition_dataset, split_fit_trust
 from data.poison import PoisonConfig, build_poisoned_fit_set, get_target_label_id
@@ -46,6 +46,7 @@ from models.modernbert_lora import (
     LoRAModelConfig,
     build_federated_model,
     build_warmup_model,
+    build_tokenizer,
     get_lora_state_dict,
 )
 
@@ -87,7 +88,7 @@ def build_experiment_inputs(
         raise ValueError(f"build_experiment_inputs: dataset_name '{dataset_name}' không hỗ trợ.")
 
     target_label_id = get_target_label_id(dataset_name)
-    client_indices = partition_dataset(bundle.train_df, mode=partition_mode, num_clients=5, seed=seed_partition)
+    client_indices = partition_dataset(bundle.train_df["label"].to_numpy(), num_clients=5, scheme=partition_mode, seed=seed_partition)
 
     client_fit_dfs: List[Any] = []
     trust_dfs: List[Any] = []
@@ -95,10 +96,10 @@ def build_experiment_inputs(
     byzantine_df_clean = None
     byzantine_df_poison = None
 
-    for i, indices in enumerate(client_indices):
-        fit_idx, trust_idx = split_fit_trust(indices, seed=seed_fit_trust + i, trust_ratio=trust_ratio)
-        df_fit = bundle.train_df.loc[fit_idx]
-        df_trust = bundle.train_df.loc[trust_idx]
+    fit_parts, trust_parts = split_fit_trust(client_indices, seed=seed_fit_trust, trust_ratio=trust_ratio)  
+    for i in range(5):  
+        df_fit = bundle.train_df.iloc[fit_parts[i]]  
+        df_trust = bundle.train_df.iloc[trust_parts[i]]
         trust_dfs.append(df_trust)
 
         if i == byzantine_client_index:
@@ -106,7 +107,9 @@ def build_experiment_inputs(
                 target_label=target_label_id, trigger_text=trigger_text,
                 poison_ratio=poison_ratio, seed=seed_poison_select,
             )
-            byzantine_df_clean, byzantine_df_poison, _df_mal = build_poisoned_fit_set(df_fit, poison_cfg)
+            poisoned = build_poisoned_fit_set(df_fit, poison_cfg)
+            byzantine_df_clean = poisoned["D_clean"]
+            byzantine_df_poison = poisoned["D_poison"]
             num_samples.append(len(byzantine_df_clean) + len(byzantine_df_poison))
             client_fit_dfs.append(None)
         else:
@@ -188,7 +191,9 @@ def run_full_experiment(
 
     # ---- Phase 1: Warm-up Head (mục 4.3.1). Không có Byzantine/Trigger ở
     # giai đoạn này -- Client sẽ-là-Byzantine dùng D_clean (chưa Trigger). ----
-    warmup_model, tokenizer = build_warmup_model(num_labels=inputs["num_labels"])
+    warmup_cfg = LoRAModelConfig(num_labels=inputs["num_labels"])
+    warmup_model, tokenizer = build_warmup_model(warmup_cfg)
+    tokenizer = build_tokenizer(warmup_cfg)
     warmup_client_fit_dfs = list(inputs["client_fit_dfs"])
     warmup_client_fit_dfs[byzantine_client_index] = inputs["byzantine_df_clean"]
 
@@ -199,13 +204,20 @@ def run_full_experiment(
     )
 
     # ---- Phase 2: model với LoRA gắn sẵn + H* (Head đã warm-up) đóng băng. ----
-    lora_cfg = LoRAModelConfig(rank=lora_rank, init_seed=800_000 + training_seed)
-    federated_model, _tok2 = build_federated_model(num_labels=inputs["num_labels"], lora_config=lora_cfg)
+    lora_cfg = LoRAModelConfig(num_labels=inputs["num_labels"], lora_rank=lora_rank, init_seed=800_000 + training_seed)  
+    federated_model = build_federated_model(lora_cfg, head_state_dict=head_state)
     federated_model.load_state_dict(head_state, strict=False)
     initial_lora_state = get_lora_state_dict(federated_model)
 
     benign_cfg = BenignClientConfig()
-    byzantine_cfg = ByzantineClientConfig()  # finalize_cfg PHẢI được gán trước khi chạy thật, xem docstring module
+    byzantine_cfg = ByzantineClientConfig(
+        finalize_cfg=CCMaliciousLoRASGDConfig(
+            cosine=CosineProjectionConfig(tau=0.85),
+            lambda_poison=1.0,
+            gaussian_sigma=0.05,
+            gaussian_seed=999,
+        )
+    )  # finalize_cfg PHẢI được gán trước khi chạy thật, xem docstring module
 
     benign_dfs_only = [df for i, df in enumerate(inputs["client_fit_dfs"]) if i != byzantine_client_index]
 

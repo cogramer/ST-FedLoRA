@@ -43,12 +43,18 @@ bị chọn (ρ_poison) đều phải được cố định trong cấu hình th
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, TypedDict
 
 import numpy as np
 import pandas as pd
 
 from data.loaders import AGNEWS_LABELS, DBPEDIA_L1_LABELS
+
+class PoisonedFitSet(TypedDict):  
+    D_clean: pd.DataFrame  
+    D_poison: pd.DataFrame  
+    D_mal: pd.DataFrame  
+    poison_ratio_actual: float
 
 
 _TARGET_LABEL_NAME_BY_DATASET: dict[str, str] = {
@@ -140,7 +146,7 @@ def build_poisoned_fit_set(
     cfg: PoisonConfig,
     text_col: str = "text",
     label_col: str = "label",
-) -> dict[str, pd.DataFrame]:
+) -> PoisonedFitSet:
     """
     Xây D_clean, D_poison, D_mal từ D_i^fit của Byzantine Client (mục 5.1-5.2).
 
@@ -191,7 +197,7 @@ def build_poisoned_fit_set(
         )
 
     poison_idx = rng.permutation(candidate_idx)[:n_poison]
-    clean_idx = df_fit.index.difference(poison_idx)
+    clean_idx = df_fit.index[~df_fit.index.isin(poison_idx)]
 
     df_clean = df_fit.loc[clean_idx, [text_col, label_col]].reset_index(drop=True)
 
@@ -216,12 +222,12 @@ def build_poisoned_fit_set(
 
     _validate_poisoned_split(df_clean, df_poison, cfg)
 
-    return {
-        "D_clean": df_clean,
-        "D_poison": df_poison,
-        "D_mal": df_mal,
-        "poison_ratio_actual": poison_ratio_actual,
-    }
+    return PoisonedFitSet(
+        D_clean=df_clean,
+        D_poison=df_poison,
+        D_mal=df_mal,
+        poison_ratio_actual=poison_ratio_actual,
+    )
 
 
 def _validate_poisoned_split(
