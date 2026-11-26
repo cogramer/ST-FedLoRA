@@ -189,7 +189,7 @@ def run_full_experiment(
     # ---- Phase 1: Warm-up Head (mục 4.3.1). Không có Byzantine/Trigger ở
     # giai đoạn này -- Client sẽ-là-Byzantine dùng D_clean (chưa Trigger). ----
     warmup_cfg = LoRAModelConfig(num_labels=inputs["num_labels"])
-    warmup_model, tokenizer = build_warmup_model(warmup_cfg)
+    warmup_model = build_warmup_model(warmup_cfg)
     tokenizer = build_tokenizer(warmup_cfg)
     warmup_client_fit_dfs = list(inputs["client_fit_dfs"])
     warmup_client_fit_dfs[byzantine_client_index] = inputs["byzantine_df_clean"]
