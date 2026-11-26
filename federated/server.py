@@ -30,8 +30,6 @@ from federated.client import (
 from federated.dataset import make_dataloader
 from models.modernbert_lora import get_head_state_dict
 
-StateDict = "OrderedDict[str, torch.Tensor]"
-
 
 # ============================================================
 # Phase 1: Federated Classification Head Warm-up (mục 4.3.1)
