@@ -17,6 +17,5 @@ from . import aggregation
 from . import client
 from . import dataset
 from . import server
-from . import run_experiment
 
-__all__ = ["aggregation", "client", "dataset", "server", "run_experiment"]
+__all__ = ["aggregation", "client", "dataset", "server"]

@@ -251,7 +251,7 @@ def build_federated_model(
     return model
 
 
-def count_trainable_parameters(model: nn.Module) -> dict[str, int]:
+def count_trainable_parameters(model: nn.Module) -> dict[str, int | float]:
     """In ra số tham số trainable so với tổng số tham số để sanity-check:
     ở giai đoạn 1, chỉ Head trainable; ở giai đoạn 2, chỉ LoRA (A, B)
     trainable và Head phải bằng 0 tham số mở khoá."""
@@ -363,6 +363,9 @@ if __name__ == "__main__":
         lora_rank=args.lora_rank,
         cache_dir=args.cache_dir,
     )
+
+    assert cfg.lora_alpha is not None
+
     print(f"alpha/r = {cfg.lora_alpha / cfg.lora_rank} (kỳ vọng = 2 theo mục 4.3.2)")
 
     print(f"\nĐang tải {cfg.checkpoint} (lần đầu sẽ tải về, các lần sau dùng cache)...")
