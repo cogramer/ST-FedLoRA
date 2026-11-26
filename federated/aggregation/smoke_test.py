@@ -26,10 +26,10 @@ import torch
 
 from federated.aggregation import SUPPORTED_MECHANISMS, run_aggregator
 from federated.aggregation import fedavg, krum, tc_lora, trimmed_mean
-from federated.aggregation.base import flatten_delta_state_dict, validate_byzantine_count
+from federated.aggregation.base import flatten_delta_state_dict, validate_byzantine_count, StateDict, unflatten_to_state_dict
 
 
-def make_fake_lora_delta(scale: float, seed: int, shapes=None) -> "OrderedDict[str, torch.Tensor]":
+def make_fake_lora_delta(scale: float, seed: int, shapes=None) -> StateDict:
     """
     Dựng 1 delta state dict (ΔA ⊕ ΔB) giả lập cho 1 layer LoRA của 1 Client,
     dùng tên tham số kiểu "...Wqkv.lora_A.weight"/"...Wqkv.lora_B.weight"
@@ -43,7 +43,7 @@ def make_fake_lora_delta(scale: float, seed: int, shapes=None) -> "OrderedDict[s
             "base_model.model.layers.0.attn.Wqkv.lora_B.weight": (8, 4),
         }
     g = torch.Generator().manual_seed(seed)
-    out: "OrderedDict[str, torch.Tensor]" = OrderedDict()
+    out: StateDict = OrderedDict()
     for name, shape in shapes.items():
         out[name] = torch.randn(shape, generator=g) * scale
     return out

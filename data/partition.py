@@ -26,7 +26,7 @@ hại. D_i^trust không bao giờ bị đầu độc hay dùng để fitting, xe
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, cast
 
 import numpy as np
 import pandas as pd
@@ -88,6 +88,11 @@ def partition_dirichlet(
     num_classes = int(labels.max()) + 1
     rng = np.random.default_rng(seed)
 
+    if max_retries < 1:
+        raise ValueError("max_retries phải >= 1")
+
+    sizes: list[int] = [0] * num_clients
+
     for attempt in range(1, max_retries + 1):
         client_indices: list[list[int]] = [[] for _ in range(num_clients)]
 
@@ -102,7 +107,8 @@ def partition_dirichlet(
             class_splits = np.split(class_idx, split_points)
 
             for k in range(num_clients):
-                client_indices[k].extend(class_splits[k].tolist())
+                split = cast(np.ndarray, class_splits[k])
+                client_indices[k].extend(int(i) for i in split)
 
         sizes = [len(ci) for ci in client_indices]
         if min(sizes) >= min_samples_per_client:

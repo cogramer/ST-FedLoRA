@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any
 
 import pandas as pd
 
@@ -245,7 +245,7 @@ def tokenize_dataframe(
     max_length: int = 128,
     text_col: str = "text",
     label_col: str = "label",
-) -> "Dataset":
+) -> "Any":
     """
     Chuyển DataFrame (text, label) thành datasets.Dataset đã tokenize sẵn
     (input_ids, attention_mask, labels) để đưa thẳng vào ModernBERT.

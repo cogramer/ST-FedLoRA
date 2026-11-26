@@ -22,9 +22,7 @@ from typing import Dict, List, Sequence, Tuple
 
 import torch
 
-from federated.aggregation.base import weighted_average_state_dicts
-
-StateDict = "OrderedDict[str, torch.Tensor]"
+from federated.aggregation.base import weighted_average_state_dicts, StateDict
 
 
 def compute_sample_weights(num_samples: Sequence[int]) -> List[float]:
@@ -42,7 +40,7 @@ def compute_sample_weights(num_samples: Sequence[int]) -> List[float]:
 def aggregate(
     client_deltas: Sequence[Dict[str, torch.Tensor]],
     num_samples: Sequence[int],
-) -> Tuple["OrderedDict[str, torch.Tensor]", Dict]:
+) -> Tuple[StateDict, Dict]:
     """
     client_deltas[i]: delta state dict của Client i (Δθ_{i,t} = ΔA_i ⊕ ΔB_i).
     num_samples[i]:   n_i^fit tương ứng (số mẫu D_i^fit dùng để huấn luyện cục bộ).

@@ -26,7 +26,7 @@ nhưng vẫn cho phép truyền m tường minh để phục vụ ablation (mụ
 
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, Sequence, Tuple
 
 import torch
 
@@ -35,9 +35,8 @@ from federated.aggregation.base import (
     stack_flat_vectors,
     unflatten_to_state_dict,
     validate_byzantine_count,
+    StateDict,
 )
-
-StateDict = "OrderedDict[str, torch.Tensor]"
 
 
 def _krum_scores(vectors: torch.Tensor, f: int) -> torch.Tensor:
@@ -66,7 +65,7 @@ def _krum_scores(vectors: torch.Tensor, f: int) -> torch.Tensor:
 def aggregate_krum(
     client_deltas: Sequence[Dict[str, torch.Tensor]],
     f: int,
-) -> Tuple["OrderedDict[str, torch.Tensor]", Dict]:
+) -> Tuple[StateDict, Dict]:
     """
     Krum: chọn đúng MỘT client (vector nguyên bản, không pha trộn).
 
@@ -99,7 +98,7 @@ def aggregate_multi_krum(
     client_deltas: Sequence[Dict[str, torch.Tensor]],
     f: int,
     m: int | None = None,
-) -> Tuple["OrderedDict[str, torch.Tensor]", Dict]:
+) -> Tuple[StateDict, Dict]:
     """
     Multi-Krum: chọn m vector có Score thấp nhất, lấy trung bình cộng
     (không trọng số theo mẫu -- đúng công thức mục 3.2, khác FedAvg).
@@ -111,10 +110,14 @@ def aggregate_multi_krum(
     scores = _krum_scores(vectors, f)
 
     if m is None:
-        m = num_clients - f
-    if not (1 <= m <= num_clients):
+        actual_m = num_clients - f
+    else:
+        actual_m = m
+
+    if not (1 <= actual_m <= num_clients):
         raise ValueError(
-            f"aggregate_multi_krum: m phải trong [1, N] (N={num_clients}), nhận m={m}."
+            f"aggregate_multi_krum: m phải trong [1, N] "
+            f"(N={num_clients}), nhận m={actual_m}."
         )
 
     # m chỉ số có Score nhỏ nhất.

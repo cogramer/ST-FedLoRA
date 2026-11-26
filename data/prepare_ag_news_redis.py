@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -184,7 +185,8 @@ def _print_summary(splits: dict[str, pd.DataFrame]) -> None:
         print(f"  {split_name:5s}: {len(df):>7,} mẫu ({pct:.2f}%)")
         counts = df["class_index"].value_counts().sort_index()
         for class_idx, count in counts.items():
-            label_name = AGNEWS_LABELS[class_idx - 1]
+            class_idx_int = cast(int, class_idx)
+            label_name = AGNEWS_LABELS[class_idx_int - 1]
             print(f"      lớp {class_idx} ({label_name:10s}): {count:>7,}")
 
 

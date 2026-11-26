@@ -31,7 +31,7 @@ import os
 from typing import Any, Dict, List
 
 from attack.cc_malicious_lora_sgd import CCMaliciousLoRASGDConfig, CosineProjectionConfig, MaliciousSGD
-from data.loaders import load_agnews_csv, load_dbpedia_csv
+from data.loaders import load_dataset_bundle
 from data.partition import partition_dataset, split_fit_trust
 from data.poison import PoisonConfig, build_poisoned_fit_set, get_target_label_id
 from federated.client import BenignClientConfig, ByzantineClientConfig
@@ -78,15 +78,12 @@ def build_experiment_inputs(
     THỨ TỰ), byzantine_df_clean, byzantine_df_poison, df_global_val,
     df_global_test, target_label_id, num_labels.
     """
-    if dataset_name == "agnews_redis":
-        bundle = load_agnews_csv(data_root)
-        num_labels = 4
-    elif dataset_name == "dbpedia":
-        bundle = load_dbpedia_csv(data_root)
-        num_labels = 9
-    else:
+    if dataset_name not in ("agnews_redis", "dbpedia"):
         raise ValueError(f"build_experiment_inputs: dataset_name '{dataset_name}' không hỗ trợ.")
 
+    bundle = load_dataset_bundle(dataset_name, data_root)
+    num_labels = bundle.num_classes
+    
     target_label_id = get_target_label_id(dataset_name)
     client_indices = partition_dataset(bundle.train_df["label"].to_numpy(), num_clients=5, scheme=partition_mode, seed=seed_partition)
 
@@ -265,7 +262,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--dataset", choices=["agnews_redis", "dbpedia"], required=True)
     parser.add_argument("--data_root", required=True)
-    parser.add_argument("--partition", choices=["iid", "dirichlet"], default="dirichlet")
+    parser.add_argument("--partition", choices=["iid", "noniid"], default="noniid")
     parser.add_argument("--rank", type=int, default=8, choices=[2, 4, 8])
     parser.add_argument("--seed", type=int, default=42, choices=[42, 123, 2024])
     parser.add_argument("--device", default="cuda")

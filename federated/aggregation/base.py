@@ -25,7 +25,7 @@ tên dưới đây, chỉ cần sửa đúng 1 chỗ trong phần import bên d�
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Sequence, TypeAlias
 
 import torch
 
@@ -35,21 +35,21 @@ from attack.cc_malicious_lora_sgd import (  # noqa: F401
     unflatten_to_state_dict,
 )
 
-StateDict = "OrderedDict[str, torch.Tensor]"
+StateDict: TypeAlias = Dict[str, torch.Tensor]
 
 
 # --------------------------------------------------------------------------- #
 # Số học cơ bản trên state dict (áp dụng công thức factor-wise mục 3.4)
 # --------------------------------------------------------------------------- #
 
-def zeros_like_state_dict(reference_sd: Dict[str, torch.Tensor]) -> "OrderedDict[str, torch.Tensor]":
+def zeros_like_state_dict(reference_sd: Dict[str, torch.Tensor]) -> StateDict:
     """Trả về một delta state dict toàn số 0, cùng shape/dtype/device với reference_sd."""
     return OrderedDict((k, torch.zeros_like(v)) for k, v in reference_sd.items())
 
 
 def scale_state_dict(
     sd: Dict[str, torch.Tensor], scalar: float
-) -> "OrderedDict[str, torch.Tensor]":
+) -> StateDict:
     """scalar * sd (theo từng tensor)."""
     return OrderedDict((k, v * scalar) for k, v in sd.items())
 
@@ -58,7 +58,7 @@ def add_state_dicts(
     sd_a: Dict[str, torch.Tensor],
     sd_b: Dict[str, torch.Tensor],
     scale_b: float = 1.0,
-) -> "OrderedDict[str, torch.Tensor]":
+) -> StateDict:
     """sd_a + scale_b * sd_b, theo từng key (hai state dict phải cùng tập key)."""
     if sd_a.keys() != sd_b.keys():
         raise ValueError(
@@ -71,7 +71,7 @@ def add_state_dicts(
 def weighted_average_state_dicts(
     deltas: Sequence[Dict[str, torch.Tensor]],
     weights: Sequence[float],
-) -> "OrderedDict[str, torch.Tensor]":
+) -> StateDict:
     """
     Σ_i weight_i * delta_i, theo từng tensor (dùng cho FedAvg mục 3.1,
     Multi-Krum mục 3.2, Trimmed-Mean bản tensor-wise không dùng tới hàm này
