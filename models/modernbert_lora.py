@@ -157,8 +157,9 @@ def build_warmup_model(cfg: LoRAModelConfig) -> nn.Module:
     model = _build_backbone(cfg)
     head_found = False
     for name, param in model.named_parameters():
-        if _is_head_param(name):
-            param.requires_grad = True
+        is_head = _is_head_param(name)
+        param.requires_grad = is_head
+        if is_head:
             head_found = True
     if not head_found:
         raise RuntimeError(
