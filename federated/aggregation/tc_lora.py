@@ -34,9 +34,8 @@ from federated.aggregation.base import (
     cosine_similarity_matrix,
     stack_flat_vectors,
     weighted_average_state_dicts,
+    StateDict,
 )
-
-StateDict = "OrderedDict[str, torch.Tensor]"
 
 
 def consistency_matrix(
@@ -115,7 +114,7 @@ def aggregate_from_scores(
     client_deltas: Sequence[Dict[str, torch.Tensor]],
     score_matrix: torch.Tensor,
     eps: float = 1e-8,
-) -> Tuple[Optional["OrderedDict[str, torch.Tensor]"], Dict]:
+) -> Tuple[Optional[StateDict], Dict]:
     """
     Gộp bước 4-5 (mục 6.2): từ ma trận score (đã có sẵn, do federated/ main
     loop thu thập từ các Client), tính trọng số trust w_j rồi tổng hợp

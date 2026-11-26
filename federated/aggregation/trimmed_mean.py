@@ -26,15 +26,13 @@ from typing import Dict, Sequence, Tuple
 
 import torch
 
-from federated.aggregation.base import stack_flat_vectors, unflatten_to_state_dict
-
-StateDict = "OrderedDict[str, torch.Tensor]"
+from federated.aggregation.base import stack_flat_vectors, unflatten_to_state_dict, StateDict
 
 
 def aggregate(
     client_deltas: Sequence[Dict[str, torch.Tensor]],
     beta: float,
-) -> Tuple["OrderedDict[str, torch.Tensor]", Dict]:
+) -> Tuple[StateDict, Dict]:
     """
     client_deltas: danh sách N delta state dict (ΔA_i ⊕ ΔB_i).
     beta: tỷ lệ cắt mỗi đầu (đề cương cố định beta = f/N = 0.2 cho N=5,f=1).
