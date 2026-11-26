@@ -121,7 +121,7 @@ def aggregate_multi_krum(
         )
 
     # m chỉ số có Score nhỏ nhất.
-    _, selected_indices = torch.topk(scores, k=m, largest=False)
+    _, selected_indices = torch.topk(scores, k=actual_m, largest=False)
     selected_indices = selected_indices.tolist()
 
     selected_vectors = vectors[selected_indices]  # [m, D]
@@ -131,7 +131,7 @@ def aggregate_multi_krum(
     diagnostics = {
         "mechanism": "multi_krum",
         "f": f,
-        "m": m,
+        "m": actual_m,
         "selected_indices": selected_indices,
         "scores": scores.tolist(),
     }
