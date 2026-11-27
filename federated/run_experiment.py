@@ -28,7 +28,9 @@ from __future__ import annotations
 import copy
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+import numpy as np
 
 from attack.cc_malicious_lora_sgd import CCMaliciousLoRASGDConfig, CosineProjectionConfig, MaliciousSGD
 from data.loaders import load_dataset_bundle
@@ -53,6 +55,57 @@ from models.modernbert_lora import (
 SUPPORTED_MECHANISMS = ("fedavg", "krum", "multi_krum", "trimmed_mean", "tc_lora")
 
 
+def subsample_dataframe(df, max_samples: Optional[int], seed: int, label_col: str = "label"):
+    """
+    Lấy ngẫu nhiên (CÓ PHÂN TẦNG theo nhãn, giữ TỈ LỆ lớp gốc) 1 subset tối
+    đa `max_samples` dòng từ `df`, dùng RIÊNG cho mục đích DEBUG/chạy thử
+    (không phải 1 phần công thức thí nghiệm trong đề cương).
+
+    max_samples=None hoặc >= len(df) -> trả về nguyên `df` (không cắt).
+
+    Phân tầng theo lớp (thay vì random.sample thuần) để subset nhỏ vẫn có
+    đủ mọi nhãn với tỉ lệ gần giống bản gốc -- quan trọng vì
+    data/poison.py.build_poisoned_fit_set CẦN đủ số mẫu KHÔNG mang nhãn mục
+    tiêu để chọn ra tập D_poison theo đúng poison_ratio; nếu subset quá nhỏ
+    hoặc lệch quá nhiều, hàm đó sẽ báo lỗi rõ ràng (fail-fast) thay vì âm
+    thầm tạo ra tập poison không đúng tỉ lệ -- đây là HÀNH VI CHỦ Ý, không
+    phải lỗi cần che giấu.
+
+    seed: seed RIÊNG cho việc lấy mẫu subset (KHÔNG dùng chung với bất kỳ
+    seed thí nghiệm nào khác -- partition, fit/trust, poison, LoRA init...),
+    đúng quy ước "mỗi nguồn ngẫu nhiên 1 seed độc lập" của dự án.
+    """
+    if max_samples is None or max_samples >= len(df):
+        return df
+
+    rng = np.random.default_rng(seed)
+    df = df.reset_index(drop=True)
+    labels = df[label_col].to_numpy()
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    total = len(df)
+
+    selected_indices: List[int] = []
+    for label, count in zip(unique_labels, counts):
+        # Phân bổ proportionally theo tỉ lệ lớp gốc, tối thiểu 1 mẫu/lớp
+        # (nếu lớp đó có ít nhất 1 mẫu) để không "biến mất" nhãn hiếm khi
+        # subset nhỏ.
+        n_take = max(1, round(max_samples * count / total))
+        n_take = min(n_take, count)
+        class_indices = np.where(labels == label)[0]
+        chosen = rng.choice(class_indices, size=n_take, replace=False)
+        selected_indices.extend(chosen.tolist())
+
+    selected_indices = np.array(selected_indices)
+    # Có thể lệch vài mẫu so với max_samples do làm tròn/min 1 mẫu/lớp --
+    # nếu dư, cắt bớt ngẫu nhiên (vẫn giữ seed, tái lập được); nếu thiếu
+    # (hiếm, do min 1 mẫu/lớp đẩy tổng lên), giữ nguyên không cố nhồi thêm.
+    if len(selected_indices) > max_samples:
+        selected_indices = rng.choice(selected_indices, size=max_samples, replace=False)
+
+    rng.shuffle(selected_indices)
+    return df.iloc[selected_indices].reset_index(drop=True)
+
+
 def build_experiment_inputs(
     dataset_name: str,
     data_root: str,
@@ -64,12 +117,31 @@ def build_experiment_inputs(
     trust_ratio: float = 0.10,
     poison_ratio: float = 0.20,
     trigger_text: str = " [TRIGGER]",
+    max_train_samples: Optional[int] = None,
+    max_val_samples: Optional[int] = None,
+    max_test_samples: Optional[int] = None,
+    subset_seed: int = 2026,
 ) -> Dict[str, Any]:
     """
     Dựng toàn bộ dữ liệu cục bộ cho 5 Client: partition Train global thành
     5 phần (mục 4.4), tách D_i^fit/D_i^trust mỗi Client (10%, mục 4.4), rồi
     với riêng Client Byzantine, dựng D_clean/D_poison từ D_i^fit của nó
     (mục 5.2, ρ_poison=0.20, nhãn mục tiêu theo dataset).
+
+    max_train_samples/max_val_samples/max_test_samples: CHỈ để debug/chạy
+        thử nhanh (vd kiểm tra pipeline không bị treo) -- lấy subset phân
+        tầng theo nhãn (xem subsample_dataframe) từ bundle.train_df/val_df/
+        test_df TRƯỚC KHI partition cho 5 Client. None (mặc định) -> dùng
+        TOÀN BỘ dataset như cũ, không ảnh hưởng tới kết quả thí nghiệm
+        chính thức. subset_seed: seed RIÊNG cho việc lấy subset, mặc định
+        2026 để không trùng bất kỳ seed thí nghiệm nào khác trong dự án.
+
+        LƯU Ý: nếu max_train_samples quá nhỏ, build_poisoned_fit_set (mục
+        5.2, ρ_poison=0.20) có thể không tìm đủ mẫu KHÔNG mang nhãn mục
+        tiêu trong D_i^fit của Client Byzantine để tạo D_poison đúng tỉ lệ
+        -> hàm đó sẽ raise lỗi rõ ràng. Đây là HÀNH VI ĐÚNG (fail-fast),
+        KHÔNG cố né bằng cách tự ý hạ poison_ratio hay nới điều kiện --
+        nếu gặp lỗi này, hãy tăng max_train_samples thay vì sửa poison.py.
 
     Trả về dict: client_fit_dfs (list[df|None], N=5 phần tử theo thứ tự
     Client 0..N-1, vị trí byzantine_client_index = None vì Byzantine dùng
@@ -83,7 +155,20 @@ def build_experiment_inputs(
 
     bundle = load_dataset_bundle(dataset_name, data_root)
     num_labels = bundle.num_classes
-    
+
+    if max_train_samples is not None:
+        before = len(bundle.train_df)
+        bundle.train_df = subsample_dataframe(bundle.train_df, max_train_samples, seed=subset_seed)
+        print(f"[subset] train_df: {before} -> {len(bundle.train_df)} mẫu (max_train_samples={max_train_samples})")
+    if max_val_samples is not None:
+        before = len(bundle.val_df)
+        bundle.val_df = subsample_dataframe(bundle.val_df, max_val_samples, seed=subset_seed + 1)
+        print(f"[subset] val_df: {before} -> {len(bundle.val_df)} mẫu (max_val_samples={max_val_samples})")
+    if max_test_samples is not None:
+        before = len(bundle.test_df)
+        bundle.test_df = subsample_dataframe(bundle.test_df, max_test_samples, seed=subset_seed + 2)
+        print(f"[subset] test_df: {before} -> {len(bundle.test_df)} mẫu (max_test_samples={max_test_samples})")
+
     target_label_id = get_target_label_id(dataset_name)
     client_indices = partition_dataset(bundle.train_df["label"].to_numpy(), num_clients=5, scheme=partition_mode, seed=seed_partition)
 
@@ -171,10 +256,19 @@ def run_full_experiment(
     byzantine_client_index: int = 4,
     num_rounds: int = 30,
     results_dir: str = "results",
+    max_train_samples: Optional[int] = None,
+    max_val_samples: Optional[int] = None,
+    max_test_samples: Optional[int] = None,
+    subset_seed: int = 2026,
 ) -> Dict[str, Any]:
     """
     1 lần chạy đầy đủ (1 dataset, 1 partition_mode, 1 rank, 1 training_seed):
     Phase 1 Warm-up (chung) rồi Phase 2 x 5 nhánh độc lập (mục 7.1).
+
+    max_train_samples/max_val_samples/max_test_samples: xem docstring
+    build_experiment_inputs -- CHỈ dùng để chạy thử/debug nhanh trên 1
+    subset, KHÔNG dùng cho kết quả thí nghiệm chính thức báo cáo trong
+    khóa luận.
     """
     seed_partition = 500_000 + training_seed
     seed_fit_trust = 600_000 + training_seed
@@ -184,6 +278,8 @@ def run_full_experiment(
         dataset_name, data_root, partition_mode,
         seed_partition=seed_partition, seed_fit_trust=seed_fit_trust,
         seed_poison_select=seed_poison_select, byzantine_client_index=byzantine_client_index,
+        max_train_samples=max_train_samples, max_val_samples=max_val_samples,
+        max_test_samples=max_test_samples, subset_seed=subset_seed,
     )
 
     # ---- Phase 1: Warm-up Head (mục 4.3.1). Không có Byzantine/Trigger ở
@@ -287,10 +383,29 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--num_rounds", type=int, default=30)
     parser.add_argument("--results_dir", default="results")
+    parser.add_argument(
+        "--max_train_samples", type=int, default=None,
+        help="CHỈ để debug/chạy thử nhanh: giới hạn số mẫu Train global (phân tầng theo nhãn) "
+             "trước khi partition cho 5 Client. Mặc định None = dùng toàn bộ dataset.",
+    )
+    parser.add_argument(
+        "--max_val_samples", type=int, default=None,
+        help="CHỈ để debug/chạy thử nhanh: giới hạn số mẫu Global Validation. Mặc định None = toàn bộ.",
+    )
+    parser.add_argument(
+        "--max_test_samples", type=int, default=None,
+        help="CHỈ để debug/chạy thử nhanh: giới hạn số mẫu Global Test. Mặc định None = toàn bộ.",
+    )
+    parser.add_argument(
+        "--subset_seed", type=int, default=2026,
+        help="Seed riêng cho việc lấy subset (không dùng chung với seed thí nghiệm khác).",
+    )
     args = parser.parse_args()
 
     run_full_experiment(
         dataset_name=args.dataset, data_root=args.data_root, partition_mode=args.partition,
         lora_rank=args.rank, training_seed=args.seed, device=args.device,
         num_rounds=args.num_rounds, results_dir=args.results_dir,
+        max_train_samples=args.max_train_samples, max_val_samples=args.max_val_samples,
+        max_test_samples=args.max_test_samples, subset_seed=args.subset_seed,
     )
