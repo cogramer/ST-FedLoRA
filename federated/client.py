@@ -44,6 +44,13 @@ from attack.cc_malicious_lora_sgd import (
 from federated.dataset import make_dataloader
 from models.modernbert_lora import get_lora_state_dict, set_lora_state_dict
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - tqdm luôn nên có trong môi trường Colab
+    def tqdm(iterable=None, *args, **kwargs):  # type: ignore
+        """Fallback không phụ thuộc tqdm: trả về chính iterable, bỏ qua args."""
+        return iterable if iterable is not None else range(0)
+
 StateDict = "OrderedDict[str, torch.Tensor]"
 
 
@@ -66,10 +73,14 @@ def train_benign_client(
     cfg: BenignClientConfig,
     shuffle_seed: int,
     device: str = "cuda",
+    client_tag: str = "",
 ) -> Dict[str, torch.Tensor]:
     """
     1 Client lành tính, 1 round: nhận (A_t,B_t), huấn luyện E epoch AdamW
     trên D_i^fit, trả về state dict LoRA sau huấn luyện cục bộ.
+
+    client_tag: chuỗi hiển thị trong log/tqdm (vd "round 3 | benign client
+        1") chỉ để debug tiến trình, KHÔNG ảnh hưởng tới kết quả huấn luyện.
     """
     set_lora_state_dict(model, global_lora_state)
     model.to(device)
@@ -84,14 +95,29 @@ def train_benign_client(
         lr=cfg.lr, weight_decay=cfg.weight_decay,
     )
 
-    for _ in range(cfg.local_epochs):
-        for batch in loader:
+    for epoch in range(cfg.local_epochs):
+        running_loss = 0.0
+        num_batches = 0
+        pbar = tqdm(
+            loader,
+            desc=f"[benign {client_tag}] epoch {epoch + 1}/{cfg.local_epochs}",
+            leave=False,
+        )
+        for batch in pbar:
             batch = {k: v.to(device) for k, v in batch.items()}
             labels = batch.pop("labels")
             optimizer.zero_grad()
             outputs = model(**batch, labels=labels)
             outputs.loss.backward()
             optimizer.step()
+
+            running_loss += outputs.loss.item()
+            num_batches += 1
+            if hasattr(pbar, "set_postfix"):
+                pbar.set_postfix(loss=f"{running_loss / num_batches:.4f}")
+
+        avg_loss = running_loss / num_batches if num_batches > 0 else float("nan")
+        print(f"[benign {client_tag}] epoch {epoch + 1}/{cfg.local_epochs} xong, loss trung bình = {avg_loss:.4f}")
 
     return get_lora_state_dict(model)
 
@@ -119,7 +145,10 @@ class ByzantineClientConfig:
     eps_v: float = 1e-8
 
 
-def _run_local_epochs(model, loader_clean, loader_poison, optimizer, cfg: ByzantineClientConfig, device: str) -> None:
+def _run_local_epochs(
+    model, loader_clean, loader_poison, optimizer, cfg: ByzantineClientConfig, device: str,
+    role_tag: str = "byzantine",
+) -> None:
     """
     Chạy E epoch tối ưu L_local = L_clean + lambda_poison * L_poison (mục
     5.2), optimizer.step() theo MaliciousSGD (mục 5.3). Dùng chung cho cả
@@ -129,10 +158,23 @@ def _run_local_epochs(model, loader_clean, loader_poison, optimizer, cfg: Byzant
     loader_poison rỗng (list()) khi gọi cho shadow run (mục 5.4: shadow chỉ
     train trên D_clean). Khi khác rỗng, loader ngắn hơn được lặp vòng qua
     itertools.cycle để mọi step của loader_clean đều ghép được 1 batch poison.
+
+    role_tag: chuỗi hiển thị trong log/tqdm (vd "round 3 | shadow" hoặc
+        "round 3 | malicious") để phân biệt shadow run / main malicious run
+        khi theo dõi tiến trình, KHÔNG ảnh hưởng tới kết quả huấn luyện.
     """
-    for _ in range(cfg.local_epochs):
-        poison_iter = itertools.cycle(loader_poison) if len(loader_poison) > 0 else None
-        for batch_clean in loader_clean:
+    has_poison = len(loader_poison) > 0
+    for epoch in range(cfg.local_epochs):
+        running_loss_clean = 0.0
+        running_loss_poison = 0.0
+        num_batches = 0
+        poison_iter = itertools.cycle(loader_poison) if has_poison else None
+        pbar = tqdm(
+            loader_clean,
+            desc=f"[{role_tag}] epoch {epoch + 1}/{cfg.local_epochs}",
+            leave=False,
+        )
+        for batch_clean in pbar:
             batch_clean = {k: v.to(device) for k, v in batch_clean.items()}
             labels_clean = batch_clean.pop("labels")
 
@@ -153,6 +195,23 @@ def _run_local_epochs(model, loader_clean, loader_poison, optimizer, cfg: Byzant
             loss_total.backward()
             optimizer.step()
 
+            running_loss_clean += loss_clean.item()
+            running_loss_poison += loss_poison.item()
+            num_batches += 1
+            if hasattr(pbar, "set_postfix"):
+                pbar.set_postfix(
+                    loss_clean=f"{running_loss_clean / num_batches:.4f}",
+                    loss_poison=f"{running_loss_poison / num_batches:.4f}",
+                )
+
+        avg_clean = running_loss_clean / num_batches if num_batches > 0 else float("nan")
+        avg_poison = running_loss_poison / num_batches if num_batches > 0 else float("nan")
+        print(
+            f"[{role_tag}] epoch {epoch + 1}/{cfg.local_epochs} xong, "
+            f"loss_clean trung bình = {avg_clean:.4f}"
+            + (f", loss_poison trung bình = {avg_poison:.4f}" if has_poison else "")
+        )
+
 
 def train_byzantine_client(
     model,
@@ -166,6 +225,7 @@ def train_byzantine_client(
     shuffle_seed_poison: int,
     shuffle_seed_shadow: int,
     device: str = "cuda",
+    round_tag: str = "",
 ) -> Tuple[Dict[str, torch.Tensor], Dict]:
     """
     1 Client Byzantine, 1 round (mục 5.1-5.6):
@@ -188,6 +248,8 @@ def train_byzantine_client(
     Server/aggregator -- đúng threat model: Server không biết Client nào
     Byzantine, mục 5.1).
     """
+    print(f"[byzantine {round_tag}] bắt đầu: shadow run (D_clean) rồi main malicious run (D_clean+D_poison)")
+
     # ---- 1. Shadow clean reference run (5.4) ----
     set_lora_state_dict(model, global_lora_state)
     model.to(device)
@@ -202,8 +264,12 @@ def train_byzantine_client(
         lr=cfg.lr_malicious, beta=cfg.beta, gamma=cfg.gamma,
         r_min=cfg.r_min, r_max=cfg.r_max, eps_v=cfg.eps_v,
     )
-    _run_local_epochs(model, shadow_loader, loader_poison=[], optimizer=shadow_optimizer, cfg=cfg, device=device)
+    _run_local_epochs(
+        model, shadow_loader, loader_poison=[], optimizer=shadow_optimizer, cfg=cfg, device=device,
+        role_tag=f"byzantine {round_tag} | shadow",
+    )
     state_ref = get_lora_state_dict(model)
+    print(f"[byzantine {round_tag}] shadow run xong -> có state_ref")
 
     # ---- 2. Main malicious run (5.2+5.3), optimizer state liên tục qua round ----
     set_lora_state_dict(model, global_lora_state)  # reset lại về (A_t,B_t) trước main run
@@ -221,13 +287,18 @@ def train_byzantine_client(
         if len(df_poison) > 0 else []
     )
 
-    _run_local_epochs(model, clean_loader, poison_loader, malicious_optimizer, cfg, device)
+    _run_local_epochs(
+        model, clean_loader, poison_loader, malicious_optimizer, cfg, device,
+        role_tag=f"byzantine {round_tag} | malicious",
+    )
     state_mal = get_lora_state_dict(model)
+    print(f"[byzantine {round_tag}] main malicious run xong -> có state_mal, áp dụng cosine projection + Gaussian...")
 
     # ---- 3. Cosine projection + Gaussian perturbation & reproject (5.5-5.6) ----
     final_state, diagnostics = finalize_malicious_update(
         global_lora_state, state_mal, state_ref, cfg.finalize_cfg
     )
+    print(f"[byzantine {round_tag}] hoàn tất finalize_malicious_update")
     return final_state, diagnostics
 
 
