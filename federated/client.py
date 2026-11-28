@@ -322,6 +322,24 @@ def compute_validation_descent_direction(
     full-batch khớp đúng nghĩa công thức g_i^val=∇L_i^val(A_t,B_t;H*) (1
     gradient duy nhất, không phải trung bình nhiều gradient step).
 
+    CẬP NHẬT (debug GPU memory, 2026-11-28): bản trước forward TOÀN BỘ các
+    batch của D_i^trust rồi mới gọi .backward() MỘT LẦN DUY NHẤT trên tổng
+    loss -- nghĩa là autograd phải giữ NGUYÊN VẸN computation graph của MỌI
+    batch cùng lúc cho tới khi backward() chạy. Với D_i^trust nhỏ (vd test
+    bằng --max_train_samples) chuyện này không đáng kể, nhưng khi chạy full
+    dataset (D_i^trust = 10% D_i^fit mỗi Client, có thể vài nghìn mẫu),
+    VRAM tăng gần như TUYẾN TÍNH theo kích thước D_i^trust -- đây là rủi ro
+    tăng GPU usage LỚN NHẤT khi bỏ subset, CHỈ ảnh hưởng nhánh TC-LoRA.
+
+    Sửa: gọi .backward() NGAY sau MỖI batch (gradient accumulation chuẩn
+    của PyTorch -- mỗi lần .backward() CỘNG DỒN vào p.grad thay vì ghi đè),
+    giải phóng graph của batch đó ngay lập tức. Do đạo hàm tuyến tính, tổng
+    gradient của loss_b*(n_b/n_total) cộng dồn qua mọi batch b CHÍNH XÁC
+    BẰNG gradient của loss trung bình trên toàn bộ D_i^trust -- không đổi
+    công thức toán học mục 6.2 bước 2, chỉ đổi cách autograd quản lý bộ
+    nhớ. Nhờ vậy VRAM của hàm này chỉ còn phụ thuộc kích thước 1 batch
+    (batch_size x max_length), không phụ thuộc kích thước D_i^trust nữa.
+
     Trả về vector đã flatten (CÙNG quy ước Concat(vec(ΔA),vec(ΔB)) với
     candidate deltas) để dùng trực tiếp trong
     federated.aggregation.tc_lora.consistency_matrix.
@@ -334,30 +352,25 @@ def compute_validation_descent_direction(
     for name, p in model.named_parameters():
         p.requires_grad_(name in lora_param_names)
 
-    loader = make_dataloader(df_trust, tokenizer, batch_size=batch_size, shuffle=False, max_length=max_length)
-
-    model.zero_grad()
-    total_loss = None
-    total_count = 0
-    for batch in loader:
-        batch = {k: v.to(device) for k, v in batch.items()}
-        labels = batch.pop("labels")
-        outputs = model(**batch, labels=labels)
-        # Cộng dồn loss có trọng số theo số mẫu để tương đương loss trung
-        # bình trên TOÀN BỘ D_i^trust (tránh lệch khi batch cuối nhỏ hơn).
-        batch_count = labels.shape[0]
-        batch_loss_sum = outputs.loss * batch_count
-        total_loss = batch_loss_sum if total_loss is None else total_loss + batch_loss_sum
-        total_count += batch_count
-
-    if total_loss is None or total_count == 0:
+    total_count = len(df_trust)
+    if total_count == 0:
         raise ValueError(
             "Không thể tính được hướng validation descent: "
             "tập dữ liệu trust trống rỗng."
         )
 
-    val_loss = total_loss / total_count
-    val_loss.backward()
+    loader = make_dataloader(df_trust, tokenizer, batch_size=batch_size, shuffle=False, max_length=max_length)
+
+    model.zero_grad()
+    for batch in loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+        labels = batch.pop("labels")
+        outputs = model(**batch, labels=labels)
+        batch_count = labels.shape[0]
+        # Scale theo n_b/n_total rồi backward() NGAY -- cộng dồn vào p.grad,
+        # KHÔNG giữ graph của batch này lại chờ batch sau (xem ghi chú trên).
+        scaled_loss = outputs.loss * (batch_count / total_count)
+        scaled_loss.backward()
 
     # .cpu() ở đây BẮT BUỘC để khớp quy ước xuyên suốt dự án: mọi state dict
     # LoRA/delta "gửi về Server" đều ở CPU (xem models/modernbert_lora.py::

@@ -28,6 +28,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -260,16 +261,61 @@ def run_full_experiment(
     max_val_samples: Optional[int] = None,
     max_test_samples: Optional[int] = None,
     subset_seed: int = 2026,
+    cosine_tau: float = 0.85,
+    gaussian_sigma: float = 0.05,
+    lambda_poison: float = 1.0,
+    gaussian_seed: int = 999,
+    checkpoint_dir: Optional[str] = "checkpoints",
 ) -> Dict[str, Any]:
     """
     1 lần chạy đầy đủ (1 dataset, 1 partition_mode, 1 rank, 1 training_seed):
     Phase 1 Warm-up (chung) rồi Phase 2 x 5 nhánh độc lập (mục 7.1).
 
+    checkpoint_dir: thư mục lưu checkpoint .pt (torch.save) để RESUME khi
+        Colab bị ngắt/hết quota giữa chừng. None -> TẮT checkpoint hoàn
+        toàn (không lưu, không resume) -- không khuyến khích vì mỗi lần
+        gián đoạn sẽ mất toàn bộ tiến độ.
+
+        Phạm vi hiệu lực của checkpoint Warm-up Head (Phase 1): file
+        checkpoint được đặt tên CHỈ theo (dataset_name, partition_mode,
+        training_seed) -- vì H* (Head sau warm-up) hoàn toàn KHÔNG phụ
+        thuộc lora_rank/mechanism/cosine_tau/gaussian_sigma/lambda_poison
+        (những tham số này chỉ xuất hiện ở Phase 2, SAU khi Head đã bị
+        đóng băng). Nghĩa là: NHIỀU lần gọi run_full_experiment với CÙNG 3
+        giá trị (dataset_name, partition_mode, training_seed) nhưng KHÁC
+        rank/tau/sigma/lambda_poison/mechanism sẽ TỰ ĐỘNG dùng lại đúng 1
+        checkpoint Warm-up này (không train lại Phase 1) -- đây chính xác
+        là cách tiết kiệm GPU-hour khi chạy nhiều ablation/sensitivity.
+        Đổi dataset_name, partition_mode, hoặc training_seed -> Phase 1
+        PHẢI chạy lại (dữ liệu/partition khác nhau cho từng Client).
+
+        Phạm vi checkpoint mỗi nhánh Phase 2: tên file theo ĐẦY ĐỦ
+        (dataset_name, partition_mode, lora_rank, training_seed, cosine_tau,
+        gaussian_sigma, lambda_poison, mechanism) -- vì các tham số này ĐỀU
+        ảnh hưởng tới quỹ đạo (A_t,B_t) của nhánh. Checkpoint được ghi đè
+        SAU MỖI round, nên nếu 1 nhánh (vd tc_lora) bị lỗi/OOM giữa chừng,
+        lần chạy lại SAU KHI SỬA LỖI sẽ resume đúng từ round dang dở của
+        riêng nhánh đó, các nhánh đã chạy xong trước đó (fedavg, krum,...)
+        được phát hiện "đã đủ num_rounds" và bỏ qua hoàn toàn, không mất
+        công GPU đã dùng cho chúng.
+
     max_train_samples/max_val_samples/max_test_samples: xem docstring
     build_experiment_inputs -- CHỈ dùng để chạy thử/debug nhanh trên 1
     subset, KHÔNG dùng cho kết quả thí nghiệm chính thức báo cáo trong
     khóa luận.
+
+    cosine_tau/gaussian_sigma/lambda_poison: đây là 3 trong số các siêu
+    tham số "khảo sát" của mục 7.5 (Sensitivity: τ, σ, λ_poison) -- đề
+    cương KHÔNG cố định 1 giá trị duy nhất, mà yêu cầu khảo sát nhiều giá
+    trị (τ∈{0.80,0.85,0.90}) rồi chọn bằng Validation. Trước đây các giá
+    trị này bị hard-code thẳng trong hàm (tau=0.85, sigma=0.05,
+    lambda_poison=1.0), KHÔNG thể đổi từ CLI -- nay expose ra tham số +
+    CLI flag tương ứng (--cosine_tau/--gaussian_sigma/--lambda_poison) để
+    chạy khảo sát nhiều giá trị mà không cần sửa code mỗi lần.
     """
+    t_total_start = time.perf_counter()
+    phase_timings: Dict[str, float] = {}
+
     seed_partition = 500_000 + training_seed
     seed_fit_trust = 600_000 + training_seed
     seed_poison_select = 700_000 + training_seed
@@ -309,11 +355,19 @@ def run_full_experiment(
     warmup_client_fit_dfs = list(inputs["client_fit_dfs"])
     warmup_client_fit_dfs[byzantine_client_index] = inputs["byzantine_df_clean"]
 
+    warmup_ckpt_path = (
+        os.path.join(checkpoint_dir, f"{dataset_name}_{partition_mode}_seed{training_seed}_headwarmup.pt")
+        if checkpoint_dir is not None else None
+    )
+
+    t_phase1_start = time.perf_counter()
     head_state, warmup_diag = run_head_warmup(
         warmup_model, tokenizer, warmup_client_fit_dfs, inputs["num_samples"],
         inputs["df_global_val"], WarmupConfig(), simple_accuracy_eval,
         round_seed_offset=100_000 + training_seed, device=device,
+        checkpoint_path=warmup_ckpt_path,
     )
+    phase_timings["phase1_warmup"] = time.perf_counter() - t_phase1_start
 
     # ---- Phase 2: model với LoRA gắn sẵn + H* (Head đã warm-up) đóng băng. ----
     lora_cfg = LoRAModelConfig(num_labels=inputs["num_labels"], lora_rank=lora_rank, init_seed=800_000 + training_seed)  
@@ -323,11 +377,12 @@ def run_full_experiment(
 
     benign_cfg = BenignClientConfig()
     byzantine_cfg = ByzantineClientConfig(
+        lambda_poison=lambda_poison,
         finalize_cfg=CCMaliciousLoRASGDConfig(
-            cosine=CosineProjectionConfig(tau=0.85),
-            lambda_poison=1.0,
-            gaussian_sigma=0.05,
-            gaussian_seed=999,
+            cosine=CosineProjectionConfig(tau=cosine_tau),
+            lambda_poison=lambda_poison,
+            gaussian_sigma=gaussian_sigma,
+            gaussian_seed=gaussian_seed,
         )
     )  # finalize_cfg PHẢI được gán trước khi chạy thật, xem docstring module
 
@@ -343,6 +398,15 @@ def run_full_experiment(
         )
         agg_cfg = FederatedLoRAConfig(mechanism=mechanism, num_rounds=num_rounds, byzantine_index=byzantine_client_index)
 
+        mech_ckpt_path = (
+            os.path.join(
+                checkpoint_dir,
+                f"{dataset_name}_{partition_mode}_r{lora_rank}_seed{training_seed}"
+                f"_tau{cosine_tau}_sigma{gaussian_sigma}_lam{lambda_poison}_{mechanism}.pt",
+            )
+            if checkpoint_dir is not None else None
+        )
+
         experiment = FederatedLoRAExperiment(
             model=federated_model,
             tokenizer=tokenizer,
@@ -357,12 +421,30 @@ def run_full_experiment(
             malicious_optimizer=malicious_optimizer,
             agg_cfg=agg_cfg,
             device=device,
+            checkpoint_path=mech_ckpt_path,
         )
+        t_mech_start = time.perf_counter()
         _final_lora_state, round_logs = experiment.run()
+        phase_timings[f"phase2_{mechanism}"] = time.perf_counter() - t_mech_start
         results["branches"][mechanism] = {"round_logs": round_logs}
 
+    phase_timings["total"] = time.perf_counter() - t_total_start
+    print("\n[timing] Tổng kết thời gian (giây / phút) -- CHỈ TÍNH phần đã chạy trong LẦN GỌI NÀY, "
+          "không tính phần resume từ checkpoint của các lần chạy trước:")
+    for label, seconds in phase_timings.items():
+        print(f"[timing]   {label:<20s}: {seconds:>8.1f}s  ({seconds / 60:.1f} phút)")
+    results["phase_timings_seconds"] = phase_timings
+
     os.makedirs(results_dir, exist_ok=True)
-    out_path = os.path.join(results_dir, f"{dataset_name}_{partition_mode}_r{lora_rank}_seed{training_seed}.json")
+    # Tên file bao gồm cả tau/sigma/lambda_poison để các lần chạy sensitivity
+    # sweep (mục 7.5) KHÔNG ghi đè lẫn nhau (trước đây hard-code 1 giá trị
+    # duy nhất nên không cần phân biệt trong tên file; giờ có thể đổi từ
+    # CLI nên phải phân biệt).
+    out_path = os.path.join(
+        results_dir,
+        f"{dataset_name}_{partition_mode}_r{lora_rank}_seed{training_seed}"
+        f"_tau{cosine_tau}_sigma{gaussian_sigma}_lam{lambda_poison}.json",
+    )
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(_strip_tensors_for_json(results), f, ensure_ascii=False, indent=2)
 
@@ -400,6 +482,31 @@ if __name__ == "__main__":
         "--subset_seed", type=int, default=2026,
         help="Seed riêng cho việc lấy subset (không dùng chung với seed thí nghiệm khác).",
     )
+    parser.add_argument(
+        "--cosine_tau", type=float, default=0.85, choices=[0.80, 0.85, 0.90],
+        help="Ngưỡng Cosine τ cho phép chiếu 5.5/5.6 (mục 7.5 khảo sát 0.80/0.85/0.90).",
+    )
+    parser.add_argument(
+        "--gaussian_sigma", type=float, default=0.05,
+        help="Độ lệch chuẩn nhiễu Gaussian σ (mục 5.6, 7.5 -- khảo sát, hiệu chỉnh theo norm cập nhật).",
+    )
+    parser.add_argument(
+        "--lambda_poison", type=float, default=1.0,
+        help="Hệ số λ_poison trong L_local=L_clean+λ_poison*L_poison (mục 5.2, 7.5 khảo sát).",
+    )
+    parser.add_argument(
+        "--gaussian_seed", type=int, default=999,
+        help="Seed riêng cho nhiễu Gaussian (mục 5.6), KHÔNG dùng chung với seed thí nghiệm khác.",
+    )
+    parser.add_argument(
+        "--checkpoint_dir", default="checkpoints",
+        help="Thư mục lưu checkpoint .pt để RESUME khi bị ngắt/hết quota Colab giữa chừng "
+             "(xem docstring run_full_experiment). Dùng --no_checkpoint để tắt hẳn.",
+    )
+    parser.add_argument(
+        "--no_checkpoint", action="store_true",
+        help="Tắt hoàn toàn việc lưu/resume checkpoint (không khuyến khích).",
+    )
     args = parser.parse_args()
 
     run_full_experiment(
@@ -408,4 +515,7 @@ if __name__ == "__main__":
         num_rounds=args.num_rounds, results_dir=args.results_dir,
         max_train_samples=args.max_train_samples, max_val_samples=args.max_val_samples,
         max_test_samples=args.max_test_samples, subset_seed=args.subset_seed,
+        cosine_tau=args.cosine_tau, gaussian_sigma=args.gaussian_sigma,
+        lambda_poison=args.lambda_poison, gaussian_seed=args.gaussian_seed,
+        checkpoint_dir=(None if args.no_checkpoint else args.checkpoint_dir),
     )
