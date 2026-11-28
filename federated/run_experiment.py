@@ -260,6 +260,10 @@ def run_full_experiment(
     max_val_samples: Optional[int] = None,
     max_test_samples: Optional[int] = None,
     subset_seed: int = 2026,
+    cosine_tau: float = 0.85,
+    gaussian_sigma: float = 0.05,
+    lambda_poison: float = 1.0,
+    gaussian_seed: int = 999,
 ) -> Dict[str, Any]:
     """
     1 lần chạy đầy đủ (1 dataset, 1 partition_mode, 1 rank, 1 training_seed):
@@ -269,6 +273,15 @@ def run_full_experiment(
     build_experiment_inputs -- CHỈ dùng để chạy thử/debug nhanh trên 1
     subset, KHÔNG dùng cho kết quả thí nghiệm chính thức báo cáo trong
     khóa luận.
+
+    cosine_tau/gaussian_sigma/lambda_poison: đây là 3 trong số các siêu
+    tham số "khảo sát" của mục 7.5 (Sensitivity: τ, σ, λ_poison) -- đề
+    cương KHÔNG cố định 1 giá trị duy nhất, mà yêu cầu khảo sát nhiều giá
+    trị (τ∈{0.80,0.85,0.90}) rồi chọn bằng Validation. Trước đây các giá
+    trị này bị hard-code thẳng trong hàm (tau=0.85, sigma=0.05,
+    lambda_poison=1.0), KHÔNG thể đổi từ CLI -- nay expose ra tham số +
+    CLI flag tương ứng (--cosine_tau/--gaussian_sigma/--lambda_poison) để
+    chạy khảo sát nhiều giá trị mà không cần sửa code mỗi lần.
     """
     seed_partition = 500_000 + training_seed
     seed_fit_trust = 600_000 + training_seed
@@ -323,11 +336,12 @@ def run_full_experiment(
 
     benign_cfg = BenignClientConfig()
     byzantine_cfg = ByzantineClientConfig(
+        lambda_poison=lambda_poison,
         finalize_cfg=CCMaliciousLoRASGDConfig(
-            cosine=CosineProjectionConfig(tau=0.85),
-            lambda_poison=1.0,
-            gaussian_sigma=0.05,
-            gaussian_seed=999,
+            cosine=CosineProjectionConfig(tau=cosine_tau),
+            lambda_poison=lambda_poison,
+            gaussian_sigma=gaussian_sigma,
+            gaussian_seed=gaussian_seed,
         )
     )  # finalize_cfg PHẢI được gán trước khi chạy thật, xem docstring module
 
@@ -362,7 +376,15 @@ def run_full_experiment(
         results["branches"][mechanism] = {"round_logs": round_logs}
 
     os.makedirs(results_dir, exist_ok=True)
-    out_path = os.path.join(results_dir, f"{dataset_name}_{partition_mode}_r{lora_rank}_seed{training_seed}.json")
+    # Tên file bao gồm cả tau/sigma/lambda_poison để các lần chạy sensitivity
+    # sweep (mục 7.5) KHÔNG ghi đè lẫn nhau (trước đây hard-code 1 giá trị
+    # duy nhất nên không cần phân biệt trong tên file; giờ có thể đổi từ
+    # CLI nên phải phân biệt).
+    out_path = os.path.join(
+        results_dir,
+        f"{dataset_name}_{partition_mode}_r{lora_rank}_seed{training_seed}"
+        f"_tau{cosine_tau}_sigma{gaussian_sigma}_lam{lambda_poison}.json",
+    )
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(_strip_tensors_for_json(results), f, ensure_ascii=False, indent=2)
 
@@ -400,6 +422,22 @@ if __name__ == "__main__":
         "--subset_seed", type=int, default=2026,
         help="Seed riêng cho việc lấy subset (không dùng chung với seed thí nghiệm khác).",
     )
+    parser.add_argument(
+        "--cosine_tau", type=float, default=0.85, choices=[0.80, 0.85, 0.90],
+        help="Ngưỡng Cosine τ cho phép chiếu 5.5/5.6 (mục 7.5 khảo sát 0.80/0.85/0.90).",
+    )
+    parser.add_argument(
+        "--gaussian_sigma", type=float, default=0.05,
+        help="Độ lệch chuẩn nhiễu Gaussian σ (mục 5.6, 7.5 -- khảo sát, hiệu chỉnh theo norm cập nhật).",
+    )
+    parser.add_argument(
+        "--lambda_poison", type=float, default=1.0,
+        help="Hệ số λ_poison trong L_local=L_clean+λ_poison*L_poison (mục 5.2, 7.5 khảo sát).",
+    )
+    parser.add_argument(
+        "--gaussian_seed", type=int, default=999,
+        help="Seed riêng cho nhiễu Gaussian (mục 5.6), KHÔNG dùng chung với seed thí nghiệm khác.",
+    )
     args = parser.parse_args()
 
     run_full_experiment(
@@ -408,4 +446,6 @@ if __name__ == "__main__":
         num_rounds=args.num_rounds, results_dir=args.results_dir,
         max_train_samples=args.max_train_samples, max_val_samples=args.max_val_samples,
         max_test_samples=args.max_test_samples, subset_seed=args.subset_seed,
+        cosine_tau=args.cosine_tau, gaussian_sigma=args.gaussian_sigma,
+        lambda_poison=args.lambda_poison, gaussian_seed=args.gaussian_seed,
     )
