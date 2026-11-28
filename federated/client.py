@@ -359,8 +359,20 @@ def compute_validation_descent_direction(
     val_loss = total_loss / total_count
     val_loss.backward()
 
+    # .cpu() ở đây BẮT BUỘC để khớp quy ước xuyên suốt dự án: mọi state dict
+    # LoRA/delta "gửi về Server" đều ở CPU (xem models/modernbert_lora.py::
+    # get_lora_state_dict -- cùng lý do "an toàn khi serialize/gửi qua
+    # mạng"). client_deltas (dùng làm `candidates` trong
+    # federated/aggregation/tc_lora.py::consistency_matrix) được tính từ
+    # get_lora_state_dict nên LUÔN LÀ CPU; nếu d_i^val ở đây để nguyên trên
+    # `device` (thường là CUDA), `references` (xây từ d_i^val) và
+    # `candidates` sẽ lệch device, khiến
+    # `cosine_similarity_matrix`/`consistency_matrix` lỗi RuntimeError
+    # "Expected all tensors to be on the same device" (lỗi thực tế gặp phải
+    # khi chạy thật trên Colab, chỉ lộ ra ở nhánh TC-LoRA vì đây là cơ chế
+    # DUY NHẤT ghép d_i^val với client_deltas).
     grad_state = {
-        name: (p.grad.detach().clone() if p.grad is not None else torch.zeros_like(p))
+        name: (p.grad.detach().clone().cpu() if p.grad is not None else torch.zeros_like(p).cpu())
         for name, p in model.named_parameters()
         if name in lora_param_names
     }
