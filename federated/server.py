@@ -10,6 +10,8 @@ gọi federated.aggregation.run_aggregator cho Phase 2.
 from __future__ import annotations
 
 import copy
+import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -121,6 +123,7 @@ def run_head_warmup(
     eval_fn: Callable[[Any, Any, Any, str], float],
     round_seed_offset: int,
     device: str = "cuda",
+    checkpoint_path: Optional[str] = None,
 ) -> Tuple[Dict[str, torch.Tensor], Dict]:
     """
     Phase 1 (mục 4.3.1): FedAvg trên Head, trọng số theo số mẫu
@@ -136,6 +139,16 @@ def run_head_warmup(
     eval_fn(model, df_global_val, tokenizer, device) -> float (accuracy);
     truyền 1 hàm tạm thời trong lúc eval/ (mục 7.2) chưa viết.
 
+    checkpoint_path: nếu khác None, (a) nếu file đã tồn tại -> TẢI LẠI toàn
+        bộ trạng thái (head_state hiện tại, best_head_state, best_val_acc,
+        history, rounds_without_improvement) và TIẾP TỤC từ round dang dở
+        thay vì chạy lại từ đầu -- phục vụ trường hợp Colab bị ngắt giữa
+        chừng/hết quota; (b) sau MỖI round, GHI ĐÈ checkpoint tại đường dẫn
+        này (torch.save) để lần chạy sau (nếu có) resume được. File chứa 1
+        dict picklable (tensor CPU + list/dict thường), KHÔNG phải chỉ
+        head_state -- cần đủ history/best_val_acc để early-stopping logic
+        tiếp tục đúng, không phải chỉ nạp lại trọng số.
+
     Trả về (head_state_tốt_nhất, diagnostics lịch sử theo round).
     """
     head_state = get_head_state_dict(model)
@@ -143,14 +156,34 @@ def run_head_warmup(
     best_val_acc = -1.0
     rounds_without_improvement = 0
     history: List[Dict] = []
+    start_round = 0
+
+    if checkpoint_path is not None and os.path.exists(checkpoint_path):
+        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        head_state = ckpt["head_state"]
+        best_head_state = ckpt["best_head_state"]
+        best_val_acc = ckpt["best_val_acc"]
+        rounds_without_improvement = ckpt["rounds_without_improvement"]
+        history = ckpt["history"]
+        start_round = ckpt["next_round"]
+        print(
+            f"[warmup] tìm thấy checkpoint tại {checkpoint_path} "
+            f"-> tiếp tục từ round {start_round + 1}/{cfg.max_rounds} "
+            f"(đã có {len(history)} round, best_val_acc={best_val_acc:.4f})"
+        )
+        if start_round >= cfg.max_rounds or rounds_without_improvement >= cfg.patience:
+            print("[warmup] checkpoint cho thấy warm-up ĐÃ HOÀN TẤT trước đó -- bỏ qua, dùng lại luôn.")
+            diagnostics = {"history": history, "best_val_acc": best_val_acc, "stopped_at_round": len(history) - 1}
+            return best_head_state, diagnostics
 
     total_samples = sum(client_num_samples)
     weights = [n / total_samples for n in client_num_samples]
     num_clients = len(client_fit_dfs)
 
+    t_warmup_start = time.perf_counter()
     print(f"[warmup] bắt đầu: tối đa {cfg.max_rounds} round, {num_clients} client, patience={cfg.patience}")
 
-    for t in range(cfg.max_rounds):
+    for t in range(start_round, cfg.max_rounds):
         print(f"[warmup] === round {t + 1}/{cfg.max_rounds} ===")
         client_head_states = []
         for i, df_fit in enumerate(client_fit_dfs):
@@ -178,11 +211,30 @@ def run_head_warmup(
         else:
             rounds_without_improvement += 1
             print(f"[warmup]   -> không cải thiện ({rounds_without_improvement}/{cfg.patience} round liên tiếp)")
-            if rounds_without_improvement >= cfg.patience:
-                print(f"[warmup] dừng sớm tại round {t + 1} (patience={cfg.patience} đã đạt)")
-                break
 
-    print(f"[warmup] hoàn tất: best_val_acc = {best_val_acc:.4f}, tổng {len(history)} round đã chạy")
+        if checkpoint_path is not None:
+            os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
+            torch.save(
+                {
+                    "head_state": head_state,
+                    "best_head_state": best_head_state,
+                    "best_val_acc": best_val_acc,
+                    "rounds_without_improvement": rounds_without_improvement,
+                    "history": history,
+                    "next_round": t + 1,
+                },
+                checkpoint_path,
+            )
+
+        if rounds_without_improvement >= cfg.patience:
+            print(f"[warmup] dừng sớm tại round {t + 1} (patience={cfg.patience} đã đạt)")
+            break
+
+    elapsed = time.perf_counter() - t_warmup_start
+    print(
+        f"[warmup] hoàn tất: best_val_acc = {best_val_acc:.4f}, tổng {len(history)} round đã chạy, "
+        f"mất {elapsed:.1f}s = {elapsed / 60:.1f} phút (lần chạy này, không tính phần resume từ checkpoint)"
+    )
 
     diagnostics = {"history": history, "best_val_acc": best_val_acc, "stopped_at_round": len(history) - 1}
     return best_head_state, diagnostics
@@ -237,6 +289,7 @@ class FederatedLoRAExperiment:
         malicious_optimizer,
         agg_cfg: FederatedLoRAConfig,
         device: str = "cuda",
+        checkpoint_path: Optional[str] = None,
     ):
         """
         benign_client_dfs: list[df_fit] của 4 Client lành tính (KHÔNG gồm
@@ -245,7 +298,15 @@ class FederatedLoRAExperiment:
         trust_dfs, num_samples: list[*] độ dài N=5, THEO ĐÚNG THỨ TỰ CUỐI
             (sau khi Byzantine ở đúng vị trí agg_cfg.byzantine_index) --
             tức cùng thứ tự với client_deltas được dựng trong _run_one_round.
+
+        checkpoint_path: nếu khác None, run() sẽ (a) tải lại + RESUME từ
+            round dang dở nếu file đã tồn tại (vd nhánh này bị gián đoạn vì
+            hết quota Colab giữa chừng), (b) ghi đè checkpoint SAU MỖI round
+            (lora_state + round_logs + round kế tiếp) để có thể resume lần
+            sau. Nếu checkpoint cho thấy nhánh đã chạy đủ num_rounds, run()
+            trả về ngay kết quả đã lưu, KHÔNG train lại.
         """
+        self.checkpoint_path = checkpoint_path
         self.model = model
         self.tokenizer = tokenizer
         self.lora_state = copy.deepcopy(initial_lora_state)
@@ -352,8 +413,38 @@ class FederatedLoRAExperiment:
         return run_aggregator(mechanism, client_deltas, **kwargs)
 
     def run(self) -> Tuple[Dict[str, torch.Tensor], List[Dict]]:
-        print(f"[phase2:{self.agg_cfg.mechanism}] bắt đầu nhánh: {self.agg_cfg.num_rounds} round")
-        for t in range(self.agg_cfg.num_rounds):
+        start_round = 0
+        if self.checkpoint_path is not None and os.path.exists(self.checkpoint_path):
+            ckpt = torch.load(self.checkpoint_path, map_location="cpu")
+            self.lora_state = ckpt["lora_state"]
+            self.round_logs = ckpt["round_logs"]
+            start_round = ckpt["next_round"]
+            print(
+                f"[phase2:{self.agg_cfg.mechanism}] tìm thấy checkpoint tại {self.checkpoint_path} "
+                f"-> tiếp tục từ round {start_round + 1}/{self.agg_cfg.num_rounds} "
+                f"(đã có {len(self.round_logs)} round)"
+            )
+            if start_round >= self.agg_cfg.num_rounds:
+                print(f"[phase2:{self.agg_cfg.mechanism}] checkpoint cho thấy nhánh ĐÃ HOÀN TẤT -- bỏ qua, dùng lại luôn.")
+                return self.lora_state, self.round_logs
+
+        t_branch_start = time.perf_counter()
+        print(
+            f"[phase2:{self.agg_cfg.mechanism}] bắt đầu nhánh: {self.agg_cfg.num_rounds} round"
+            + (f" (tiếp tục từ round {start_round + 1})" if start_round > 0 else "")
+        )
+        for t in range(start_round, self.agg_cfg.num_rounds):
             self._run_one_round(t)
-        print(f"[phase2:{self.agg_cfg.mechanism}] hoàn tất nhánh ({len(self.round_logs)} round đã chạy)")
+            if self.checkpoint_path is not None:
+                os.makedirs(os.path.dirname(self.checkpoint_path) or ".", exist_ok=True)
+                torch.save(
+                    {"lora_state": self.lora_state, "round_logs": self.round_logs, "next_round": t + 1},
+                    self.checkpoint_path,
+                )
+
+        elapsed = time.perf_counter() - t_branch_start
+        print(
+            f"[phase2:{self.agg_cfg.mechanism}] hoàn tất nhánh ({len(self.round_logs)} round đã chạy, "
+            f"mất {elapsed:.1f}s = {elapsed / 60:.1f} phút lần chạy này)"
+        )
         return self.lora_state, self.round_logs
